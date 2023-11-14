@@ -96,8 +96,7 @@ impl Cronus {
         let mut jobs = HashMap::new();
 
         loop {
-            if let Ok(job) = rx.recv_timeout(StdDuration::from_millis(10)) {
-                // jobs.push(Arc::new(job));
+            if let Ok(job) = rx.try_recv() {
                 match job {
                     JobMessage::Add { job, id } => {
                         jobs.insert(id, Arc::new(job));
@@ -109,7 +108,7 @@ impl Cronus {
             }
 
             if should_run.load(Ordering::Relaxed) {
-                for (_id, job) in jobs.iter() {
+                for (id, job) in jobs.iter() {
                     let next_run = job
                         .schedule()
                         .upcoming(Utc)
@@ -121,8 +120,11 @@ impl Cronus {
                     let diff = next_run - now;
                     if diff <= Self::RUN_DIFF {
                         let job = job.clone();
+                        let id = *id;
+                        debug!("Running job: {}", id);
                         tokio::spawn(async move {
                             job.job().await;
+                            debug!("Finished job: {}", id);
                         });
                     }
                 }
