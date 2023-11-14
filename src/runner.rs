@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     future::Future,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -11,6 +12,7 @@ use std::{
 use chrono::{Duration, Utc};
 use cron::Schedule;
 use tokio::{task::JoinHandle, time::sleep};
+use uuid::Uuid;
 
 use crate::{
     anonymous_job::AnonymousJob,
@@ -21,7 +23,7 @@ use crate::{
 pub struct Cronus {
     is_running: Arc<AtomicBool>,
     handle: JoinHandle<()>,
-    job_sender: Sender<Box<dyn Job>>,
+    job_sender: Sender<JobMessage>,
 }
 
 impl Cronus {
@@ -30,7 +32,7 @@ impl Cronus {
 
     pub fn new() -> Self {
         let is_running = Arc::new(AtomicBool::new(false));
-        let (tx, rx) = channel::<Box<dyn Job>>();
+        let (tx, rx) = channel();
 
         let handle = tokio::spawn(Self::spawn_worker(rx, is_running.clone()));
 
@@ -41,16 +43,28 @@ impl Cronus {
         }
     }
 
-    pub fn add<J>(&self, job: J) -> Result<()>
+    pub fn remove(&self, id: Uuid) -> Result<()> {
+        self.job_sender
+            .send(JobMessage::Remove(id))
+            .map_err(|_| Error::ErrorRemovingJob)
+    }
+
+    pub fn add<J>(&self, job: J) -> Result<Uuid>
     where
         J: Job,
     {
+        let id = Uuid::new_v4();
         self.job_sender
-            .send(Box::new(job))
-            .map_err(|_| Error::ErrorAddingJob)
+            .send(JobMessage::Add {
+                job: Box::new(job),
+                id,
+            })
+            .map_err(|_| Error::ErrorAddingJob)?;
+
+        Ok(id)
     }
 
-    pub fn add_anonymous<F, O>(&self, schedule: Schedule, job: F) -> Result<()>
+    pub fn add_anonymous<F, O>(&self, schedule: Schedule, job: F) -> Result<Uuid>
     where
         F: Fn() -> O,
         O: Future<Output = ()>,
@@ -78,16 +92,24 @@ impl Cronus {
         self.handle.abort();
     }
 
-    async fn spawn_worker(rx: Receiver<Box<dyn Job>>, should_run: Arc<AtomicBool>) {
-        let mut jobs = vec![];
+    async fn spawn_worker(rx: Receiver<JobMessage>, should_run: Arc<AtomicBool>) {
+        let mut jobs = HashMap::new();
 
         loop {
             if let Ok(job) = rx.recv_timeout(StdDuration::from_millis(10)) {
-                jobs.push(Arc::new(job));
+                // jobs.push(Arc::new(job));
+                match job {
+                    JobMessage::Add { job, id } => {
+                        jobs.insert(id, Arc::new(job));
+                    }
+                    JobMessage::Remove(id) => {
+                        jobs.remove(&id);
+                    }
+                }
             }
 
             if should_run.load(Ordering::Relaxed) {
-                for job in jobs.iter() {
+                for (_id, job) in jobs.iter() {
                     let next_run = job
                         .schedule()
                         .upcoming(Utc)
@@ -109,4 +131,9 @@ impl Cronus {
             sleep(Self::SLEEP).await;
         }
     }
+}
+
+enum JobMessage {
+    Add { job: Box<dyn Job>, id: Uuid },
+    Remove(Uuid),
 }

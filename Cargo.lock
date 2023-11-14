@@ -121,6 +121,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "cron",
+ "log",
  "tokio",
  "uuid",
 ]
